@@ -25,6 +25,8 @@ import { bangaloreLocations } from "@/lib/bangaloreLocations";
 import { BangaloreMap, STATIONS_METADATA } from "@/components/BangaloreMap";
 import logo from "@/assets/dyanocharge-logo.png";
 
+type StationId = "A" | "B" | "C";
+
 export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = localStorage.getItem("theme");
@@ -42,6 +44,21 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [showSearchDropdown, setShowSearchDropdown] =
     useState<boolean>(false);
+
+  const [bookedSlots, setBookedSlots] = useState<Record<StationId, number>>({
+    A: 0,
+    B: 0,
+    C: 0,
+  });
+
+  const [bookingConfirmation, setBookingConfirmation] = useState<{
+    stationId: StationId;
+    stationName: string;
+    bookingId: string;
+    remainingSlots: number;
+  } | null>(null);
+
+  const hasUserBooked = bookingConfirmation !== null;
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -62,7 +79,10 @@ export default function App() {
       setFirebaseData(data);
       setLoading(false);
 
-      if (data?.vehicle?.battery && !localStorage.getItem("custom_battery_edited")) {
+      if (
+        data?.vehicle?.battery &&
+        !localStorage.getItem("custom_battery_edited")
+      ) {
         setBatteryInput(String(data.vehicle.battery));
       }
     });
@@ -85,7 +105,6 @@ export default function App() {
   const lngNum = Number(userLngInput) || 77.512;
 
   const estimatedRange = calculateRangeKm(batteryNum);
-
   const baseData = firebaseData || DEFAULT_DASHBOARD_DATA;
 
   const liveData: DashboardData = {
@@ -126,19 +145,69 @@ export default function App() {
 
   const recommendation = getRecommendation(liveData);
 
-  const getSlotMetrics = (station?: DashboardData["stations"]["A"]) => {
+  const getSlotMetrics = (
+    station?: DashboardData["stations"]["A"],
+    stationId?: StationId
+  ) => {
     const totalSlots = Number(station?.totalSlots ?? 3);
-    const occupancy = Number(station?.occupancy ?? 0);
-    const availableSlots = Math.max(0, totalSlots - occupancy);
+    const liveOccupancy = Number(station?.occupancy ?? 0);
+    const localBookedSlots = stationId ? Number(bookedSlots[stationId] ?? 0) : 0;
+
+    const effectiveOccupancy = Math.min(
+      totalSlots,
+      liveOccupancy + localBookedSlots
+    );
+
+    const availableSlots = Math.max(0, totalSlots - effectiveOccupancy);
 
     return {
       totalSlots,
-      occupancy,
+      liveOccupancy,
+      localBookedSlots,
+      occupancy: effectiveOccupancy,
       availableSlots,
       availableSlotsText: `${availableSlots} ${
         availableSlots === 1 ? "slot" : "slots"
       }`,
+      bookedSlotsText: `${localBookedSlots} ${
+        localBookedSlots === 1 ? "booking" : "bookings"
+      }`,
     };
+  };
+
+  const handleBookSlot = (stationId: StationId) => {
+    if (hasUserBooked) {
+      alert(
+        `You have already booked a slot at Station ${bookingConfirmation?.stationId}. Only one booking is allowed.`
+      );
+      return;
+    }
+
+    const station = liveData.stations[stationId];
+    const slotMetrics = getSlotMetrics(station, stationId);
+
+    if (slotMetrics.availableSlots <= 0) {
+      alert(`Station ${stationId} is fully booked. No slots are available.`);
+      return;
+    }
+
+    const bookingId = `DYN-${stationId}-${Math.floor(
+      1000 + Math.random() * 9000
+    )}`;
+
+    const remainingSlots = slotMetrics.availableSlots - 1;
+
+    setBookedSlots((prev) => ({
+      ...prev,
+      [stationId]: prev[stationId] + 1,
+    }));
+
+    setBookingConfirmation({
+      stationId,
+      stationName: STATIONS_METADATA[stationId].name,
+      bookingId,
+      remainingSlots,
+    });
   };
 
   const recommendedStationData =
@@ -146,7 +215,15 @@ export default function App() {
       ? null
       : liveData.stations[recommendation.station];
 
-  const recommendedSlots = getSlotMetrics(recommendedStationData ?? undefined);
+  const recommendedStationId =
+    recommendation.station === "AVOID"
+      ? undefined
+      : (recommendation.station as StationId);
+
+  const recommendedSlots = getSlotMetrics(
+    recommendedStationData ?? undefined,
+    recommendedStationId
+  );
 
   useEffect(() => {
     if (!firebaseData) return;
@@ -168,9 +245,9 @@ export default function App() {
     }
   }, [recommendation.station, recommendation.reason, firebaseData]);
 
-  const getStationSafetyDiagnostics = (stationId: "A" | "B" | "C") => {
+  const getStationSafetyDiagnostics = (stationId: StationId) => {
     const station = liveData.stations[stationId];
-    const slotMetrics = getSlotMetrics(station);
+    const slotMetrics = getSlotMetrics(station, stationId);
 
     const isSafe =
       station.load < 90 &&
@@ -191,7 +268,7 @@ export default function App() {
 
     if (slotMetrics.occupancy >= slotMetrics.totalSlots) {
       reasons.push(
-        `Occupancy limit reached (${slotMetrics.totalSlots}/${slotMetrics.totalSlots} slots full)`
+        `All slots are occupied (${slotMetrics.totalSlots}/${slotMetrics.totalSlots} slots full)`
       );
     }
 
@@ -212,8 +289,8 @@ export default function App() {
     };
   };
 
-  const safeStationsList = (["A", "B", "C"] as const).filter(
-    (id) => getStationSafetyDiagnostics(id).isSafe
+  const safeStationsList = (["A", "B", "C"] as const).filter((id) =>
+    getStationSafetyDiagnostics(id).isSafe
   );
 
   const filteredLocations = searchQuery
@@ -284,6 +361,52 @@ export default function App() {
             <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
               Connecting to live database telemetry...
             </span>
+          </div>
+        )}
+
+        {bookingConfirmation && (
+          <div className="mb-4 rounded-2xl border border-electric-500/30 bg-electric-500/10 px-5 py-4 shadow-sm">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <CheckCircle2 className="w-5 h-5 text-electric-500" />
+
+                  <h3 className="text-sm font-black text-electric-700 dark:text-electric-400">
+                    Slot booked successfully!
+                  </h3>
+                </div>
+
+                <p className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                  Station {bookingConfirmation.stationId} -{" "}
+                  {bookingConfirmation.stationName}
+                </p>
+
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                  Booking ID:{" "}
+                  <span className="font-bold text-zinc-900 dark:text-white">
+                    {bookingConfirmation.bookingId}
+                  </span>
+                </p>
+
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  Remaining booking slots:{" "}
+                  <span className="font-bold text-electric-600 dark:text-electric-400">
+                    {bookingConfirmation.remainingSlots}
+                  </span>
+                </p>
+
+                <p className="text-[11px] mt-2 font-semibold text-zinc-500 dark:text-zinc-400">
+                  One active booking is allowed per user in this demo.
+                </p>
+              </div>
+
+              <button
+                onClick={() => setBookingConfirmation(null)}
+                className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+              >
+                Close
+              </button>
+            </div>
           </div>
         )}
 
@@ -572,11 +695,23 @@ export default function App() {
 
                     <div className="bg-zinc-100/30 dark:bg-obsidian-850 p-2.5 rounded-lg border border-zinc-100 dark:border-slate-850">
                       <span className="text-zinc-400 font-semibold text-[9px] uppercase tracking-wider block">
-                        Available Slots
+                        Booking Slots
                       </span>
 
                       <span className="font-bold text-electric-500">
                         {recommendedSlots.availableSlotsText}
+                      </span>
+                    </div>
+
+                    <div className="bg-zinc-100/30 dark:bg-obsidian-850 p-2.5 rounded-lg border border-zinc-100 dark:border-slate-850">
+                      <span className="text-zinc-400 font-semibold text-[9px] uppercase tracking-wider block">
+                        Your Booking
+                      </span>
+
+                      <span className="font-bold text-blue-500">
+                        {bookingConfirmation
+                          ? `Station ${bookingConfirmation.stationId}`
+                          : "None"}
                       </span>
                     </div>
 
@@ -610,6 +745,29 @@ export default function App() {
                       </span>
                     </div>
                   </div>
+
+                  <button
+                    onClick={() =>
+                      recommendedStationId &&
+                      handleBookSlot(recommendedStationId)
+                    }
+                    disabled={
+                      hasUserBooked ||
+                      !recommendedStationId ||
+                      recommendedSlots.availableSlots <= 0
+                    }
+                    className={`w-full py-2.5 rounded-xl text-xs font-black tracking-widest uppercase border transition-all ${
+                      !hasUserBooked && recommendedSlots.availableSlots > 0
+                        ? "bg-electric-500 text-white hover:bg-electric-600 border-electric-500"
+                        : "bg-zinc-200 dark:bg-slate-800 text-zinc-400 border-zinc-200 dark:border-slate-800 cursor-not-allowed"
+                    }`}
+                  >
+                    {hasUserBooked
+                      ? "Slot Already Booked"
+                      : recommendedSlots.availableSlots > 0
+                      ? "Book Recommended Slot"
+                      : "No Booking Slots Available"}
+                  </button>
                 </div>
               )}
             </div>
@@ -668,7 +826,7 @@ export default function App() {
                   const liveStation = liveData.stations[id];
                   const diagnostic = getStationSafetyDiagnostics(id);
                   const isRecommended = recommendation.station === id;
-                  const slotMetrics = getSlotMetrics(liveStation);
+                  const slotMetrics = getSlotMetrics(liveStation, id);
 
                   const cardBorderClass = isRecommended
                     ? "recommended-border-glow border-electric-500"
@@ -747,16 +905,26 @@ export default function App() {
                           </div>
 
                           <div className="flex justify-between">
-                            <span>Available Slots</span>
+                            <span>Booking Slots</span>
 
                             <span
                               className={`font-black ${
-                                slotMetrics.occupancy >= slotMetrics.totalSlots
+                                slotMetrics.availableSlots <= 0
                                   ? "text-coral-500"
                                   : "text-electric-500"
                               }`}
                             >
                               {slotMetrics.availableSlotsText}
+                            </span>
+                          </div>
+
+                          <div className="flex justify-between">
+                            <span>Your Booking</span>
+
+                            <span className="font-bold text-blue-500">
+                              {bookingConfirmation?.stationId === id
+                                ? "Booked here"
+                                : "None"}
                             </span>
                           </div>
 
@@ -771,16 +939,31 @@ export default function App() {
                       </div>
 
                       <button
-                        onClick={() => handleSelectLocation(s.name, s.lat, s.lng)}
+                        onClick={() => handleBookSlot(id)}
+                        disabled={
+                          hasUserBooked ||
+                          !diagnostic.isSafe ||
+                          slotMetrics.availableSlots <= 0
+                        }
                         className={`w-full mt-4 py-2 rounded-lg text-[10px] font-black tracking-widest uppercase border transition-all ${
-                          isRecommended
-                            ? "bg-electric-500 text-white hover:bg-electric-600 border-electric-500"
-                            : "bg-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-slate-800 border-zinc-200 dark:border-slate-850"
+                          !hasUserBooked &&
+                          diagnostic.isSafe &&
+                          slotMetrics.availableSlots > 0
+                            ? isRecommended
+                              ? "bg-electric-500 text-white hover:bg-electric-600 border-electric-500"
+                              : "bg-transparent text-electric-500 hover:bg-electric-500 hover:text-white border-electric-500/60"
+                            : "bg-zinc-200 dark:bg-slate-800 text-zinc-400 border-zinc-200 dark:border-slate-850 cursor-not-allowed"
                         }`}
                       >
-                        {isRecommended
-                          ? "Recommended Route"
-                          : "Simulate Location"}
+                        {hasUserBooked
+                          ? bookingConfirmation?.stationId === id
+                            ? "Booked"
+                            : "Slot Already Booked"
+                          : slotMetrics.availableSlots <= 0
+                          ? "Fully Booked"
+                          : diagnostic.isSafe
+                          ? "Book Charging Slot"
+                          : "Unavailable"}
                       </button>
                     </div>
                   );
